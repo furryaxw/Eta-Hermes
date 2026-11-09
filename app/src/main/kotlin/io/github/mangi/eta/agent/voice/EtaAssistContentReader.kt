@@ -6,58 +6,74 @@ import android.os.Bundle
 import android.service.voice.VoiceInteractionSession
 import android.text.InputType
 import android.view.View
+import io.github.mangi.eta.config.AssistantContextPart
+import io.github.mangi.eta.config.AssistantContextPolicy
 import org.json.JSONObject
 
 /** 在后台展开系统提供的 Assist 数据；不读取无障碍节点，也不执行应用附带的 Intent。 */
 internal object EtaAssistContentReader {
-    fun read(context: Context, state: VoiceInteractionSession.AssistState): String {
+    fun read(
+        context: Context,
+        state: VoiceInteractionSession.AssistState,
+        policy: AssistantContextPolicy,
+    ): String {
         val output = BoundedText()
         val structure = state.assistStructure
         val component = structure?.activityComponent
-        output.line("焦点应用", state.isFocused.toString())
-        component?.let {
-            output.line("应用组件", it.flattenToShortString())
-            try {
-                val info = context.packageManager.getApplicationInfo(it.packageName, 0)
-                output.line("应用名称", context.packageManager.getApplicationLabel(info).toString())
-            } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
-                // 包在采集后卸载时仍保留系统提供的组件信息。
+        if (policy.includes(AssistantContextPart.FOREGROUND_APP)) {
+            output.line("焦点应用", state.isFocused.toString())
+            component?.let {
+                output.line("应用组件", it.flattenToShortString())
+                try {
+                    val info = context.packageManager.getApplicationInfo(it.packageName, 0)
+                    output.line("应用名称", context.packageManager.getApplicationLabel(info).toString())
+                } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+                    // 包在采集后卸载时仍保留系统提供的组件信息。
+                }
             }
         }
-        state.assistContent?.let { content ->
-            output.line("网页链接", content.webUri?.toString())
-            output.line("结构化内容", content.structuredData, 6_000)
-            output.line("页面动作", content.intent?.action)
-            output.line("页面链接", content.intent?.dataString)
-            content.clipData?.let { clip ->
+        if (policy.includes(AssistantContextPart.WEB)) {
+            state.assistContent?.let { content ->
+                output.line("网页链接", content.webUri?.toString())
+                output.line("结构化内容", content.structuredData, 6_000)
+                output.line("页面动作", content.intent?.action)
+                output.line("页面链接", content.intent?.dataString)
+            }
+        }
+        if (policy.includes(AssistantContextPart.APP_DATA)) {
+            state.assistContent?.clipData?.let { clip ->
                 for (index in 0 until minOf(clip.itemCount, 4)) {
                     val item = clip.getItemAt(index)
                     output.line("应用提供的文本", item.text?.toString())
                     output.line("应用提供的链接", item.uri?.toString())
                 }
             }
+            try {
+                appendData(output, state.assistData)
+            } catch (_: android.os.BadParcelableException) {
+                output.line("提示", "部分应用附加数据不可读")
+            }
         }
-        try {
-            appendData(output, state.assistData)
-        } catch (_: android.os.BadParcelableException) {
-            output.line("提示", "部分应用附加数据不可读")
-        }
-        if (structure != null) {
+        val wantsText = policy.includes(AssistantContextPart.UI_TEXT)
+        val wantsStructure = policy.includes(AssistantContextPart.UI_STRUCTURE)
+        if (structure != null && (wantsText || wantsStructure)) {
             var visited = 0
             var truncated = structure.windowNodeCount > 4
             val stack = ArrayDeque<Pair<AssistStructure.ViewNode, Int>>()
             for (windowIndex in 0 until minOf(structure.windowNodeCount, 4)) {
                 val window = structure.getWindowNodeAt(windowIndex)
-                output.line("窗口", window.title?.toString())
+                if (wantsText) output.line("窗口", window.title?.toString())
                 stack.addLast(window.rootViewNode to 0)
                 while (stack.isNotEmpty() && visited < MAX_NODES && !output.full) {
                     val (node, depth) = stack.removeLast()
                     visited++
                     if (node.visibility != View.VISIBLE || isPassword(node.inputType)) continue
-                    output.line("控件", node.className)
-                    output.line("文本", node.text?.toString())
-                    output.line("描述", node.contentDescription?.toString())
-                    output.line("提示", node.hint)
+                    if (wantsStructure) output.line("控件", node.className)
+                    if (wantsText) {
+                        output.line("文本", node.text?.toString())
+                        output.line("描述", node.contentDescription?.toString())
+                        output.line("提示", node.hint)
+                    }
                     if (depth < MAX_DEPTH) {
                         val children = minOf(node.childCount, MAX_NODES - visited - stack.size)
                         if (children < node.childCount) truncated = true

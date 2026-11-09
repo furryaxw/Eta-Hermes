@@ -47,6 +47,7 @@ internal object Prefs {
         const val AGENT_SUBAGENT_ENABLED = "agent_subagent_enabled"
         const val AGENT_VIRTUAL_DISPLAY_ENABLED = "agent_virtual_display_enabled"
         const val AGENT_RUNTIME_CONFIG_JSON = "agent_runtime_config_json"
+        const val ASSISTANT_CONTEXT_TIMING = "assistant_context_timing"
 
         /** 全部布尔开关及其默认值。 */
         val BOOLEAN_DEFAULTS: Map<String, Boolean> = mapOf(
@@ -68,7 +69,7 @@ internal object Prefs {
             AGENT_AUTO_COMPACTION_ENABLED to true,
             AGENT_SUBAGENT_ENABLED to true,
             AGENT_VIRTUAL_DISPLAY_ENABLED to true,
-        )
+        ) + AssistantContextPart.entries.associate { it.key to it.default }
 
         /** 由 Eta Runtime 最终裁决、不要求 Xposed 框架在线的开关。 */
         val LOCAL_AGENT_KEYS: Set<String> = setOf(
@@ -81,7 +82,7 @@ internal object Prefs {
             AGENT_AUTO_COMPACTION_ENABLED,
             AGENT_SUBAGENT_ENABLED,
             AGENT_VIRTUAL_DISPLAY_ENABLED,
-        )
+        ) + AssistantContextPart.entries.map { it.key }
     }
 
     /** Hook 进程缓存的只读 remote preferences，由 ModuleMain 在 onModuleLoaded 注入。 */
@@ -143,6 +144,31 @@ internal object Prefs {
         }.getOrNull() ?: legacyDefault
         return PowerAssistantTarget.resolve(persistedValue, legacyTakeover)
     }
+
+    /**
+     * 助理上下文策略：采集侧与发送侧共用一份。
+     *
+     * App 进程读本地配置；Hook 进程没有本地实例，回落到框架下发的远端配置（
+     * [reconcileAgentPreferences] 会把本地值同步过去）。
+     */
+    fun assistantContextPolicy(): AssistantContextPolicy = assistantContextPolicy(localAgent ?: remote)
+
+    fun assistantContextPolicy(preferences: SharedPreferences?): AssistantContextPolicy {
+        val timing = AssistantContextTiming.fromPersisted(
+            runCatching { preferences?.getString(Keys.ASSISTANT_CONTEXT_TIMING, null) }.getOrNull(),
+        )
+        val parts = AssistantContextPart.entries.filterTo(LinkedHashSet()) { part ->
+            runCatching { preferences?.getBoolean(part.key, part.default) }.getOrNull() ?: part.default
+        }
+        return AssistantContextPolicy(timing = timing, parts = parts)
+    }
+
+    fun putAssistantContextTiming(
+        preferences: SharedPreferences?,
+        timing: AssistantContextTiming,
+    ): Boolean = runCatching {
+        preferences?.edit()?.putString(Keys.ASSISTANT_CONTEXT_TIMING, timing.persistedValue)?.commit()
+    }.getOrNull() == true
 
     /**
      * UI 进程获取可写的 RemotePreferences。

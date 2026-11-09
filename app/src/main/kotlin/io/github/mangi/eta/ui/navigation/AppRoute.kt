@@ -22,6 +22,9 @@ sealed interface AppRoute : NavKey {
     data object WebToolsSettings : AppRoute
 
     @Serializable
+    data object HermesBackend : AppRoute
+
+    @Serializable
     data object Skills : AppRoute
 
     @Serializable

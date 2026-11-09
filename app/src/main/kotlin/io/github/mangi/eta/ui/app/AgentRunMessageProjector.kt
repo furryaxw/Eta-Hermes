@@ -538,9 +538,15 @@ internal class AgentRunMessageProjector(
         copy(
             content = authoritativeContent ?: content,
             isStreaming = false,
-            elapsedSeconds = thinkingStartedAt[id]?.let { startedAt ->
-                ((nowElapsedRealtime() - startedAt) / 1000).toInt().coerceAtLeast(0)
-            } ?: elapsedSeconds,
+            // 只在块还在流式时定格用时：run 结束时会再对所有思考块调一次 finished()，
+            // 那时若重算，早已结束的块会变成整轮耗时。
+            elapsedSeconds = if (!isStreaming) {
+                elapsedSeconds
+            } else {
+                thinkingStartedAt[id]?.let { startedAt ->
+                    ((nowElapsedRealtime() - startedAt) / 1000).toInt().coerceAtLeast(0)
+                } ?: elapsedSeconds
+            },
             collapsed = true,
         )
 

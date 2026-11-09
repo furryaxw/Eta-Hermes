@@ -8,12 +8,19 @@ import android.net.Uri
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.DataObject
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Screenshot
+import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Code
@@ -73,6 +80,11 @@ import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.accessibility.AccessibilityProtectionClient
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
+import io.github.mangi.eta.agent.hermes.HermesBridgeService
+import io.github.mangi.eta.agent.hermes.HermesMode
+import io.github.mangi.eta.agent.hermes.HermesSettings
+import io.github.mangi.eta.config.AssistantContextPart
+import io.github.mangi.eta.config.AssistantContextTiming
 import io.github.mangi.eta.config.PowerAssistantTarget
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.AppearanceUiStyle
@@ -86,6 +98,7 @@ import io.github.mangi.eta.systemizer.SystemizerInstallResult
 import io.github.mangi.eta.ui.app.EnhancementSettingsHistory
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.app.rememberDeviceCapabilities
+import io.github.mangi.eta.ui.components.EtaSegmentedControl
 import io.github.mangi.eta.ui.components.LanguagePreference
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.components.MiuixScaffoldPage
@@ -179,6 +192,8 @@ private fun SettingsPageContent(
     onBack: () -> Unit,
 ) {
     val coroutineScope = rememberCoroutineScope()
+    val hermesActive by HermesMode.enabled.collectAsState()
+    var hermesConfigured by remember { mutableStateOf(HermesSettings.isChatConfigured(context)) }
     val capabilities = rememberDeviceCapabilities()
     val enhancementHistory = remember(context.applicationContext) { EnhancementSettingsHistory(context) }
     var hasConnectedFramework by remember { mutableStateOf(enhancementHistory.hasConnected) }
@@ -249,6 +264,7 @@ private fun SettingsPageContent(
                 accessibilityGranted = isAgentAccessibilityEnabled(context)
                 accessibilityProtectionEnabled =
                     AccessibilityProtectionClient.isEnabled(context)
+                hermesConfigured = HermesSettings.isChatConfigured(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -311,6 +327,28 @@ private fun SettingsPageContent(
     val powerAssistantItems = powerAssistantTargets.map { target ->
         target.displayName(context)
     }
+    var assistantContextTiming by remember(agentPrefs) {
+        mutableStateOf(Prefs.assistantContextPolicy(agentPrefs).timing)
+    }
+    val assistantContextTimingItems = listOf(
+        stringResource(R.string.settings_assistant_context_every_turn),
+        stringResource(R.string.settings_assistant_context_first_turn),
+        stringResource(R.string.settings_assistant_context_never),
+    )
+    val onAssistantContextTimingSelect: (Int) -> Unit = { index ->
+        val timing = AssistantContextTiming.entries.getOrNull(index)
+        if (timing != null) {
+            if (Prefs.putAssistantContextTiming(agentPrefs, timing)) {
+                assistantContextTiming = timing
+            } else {
+                Toast.makeText(
+                    context.applicationContext,
+                    context.getString(R.string.settings_write_failed),
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+    }
     val onPowerTargetSelect: (Int) -> Unit = { index ->
         val target = powerAssistantTargets.getOrNull(index)
         val targetPrefs = prefs
@@ -360,6 +398,20 @@ private fun SettingsPageContent(
         }
     }
 
+    // 后端模式二选一：分段控制器取代开关，切换立即写入偏好并同步工具通道。
+    val hermesModeLabels = listOf(
+        stringResource(R.string.hermes_mode_local),
+        stringResource(R.string.hermes_mode_backend),
+    )
+    val onSelectHermesMode: (Int) -> Unit = { index ->
+        val enabled = index == 1
+        if (enabled != hermesActive) {
+            HermesMode.set(context, enabled)
+            HermesBridgeService.sync(context)
+            hermesConfigured = HermesSettings.isChatConfigured(context)
+        }
+    }
+
     when (LocalUiStyle.current) {
         AppearanceUiStyle.COUI -> {
             val pageColors = CouiPageDefaults.themeColors()
@@ -368,6 +420,39 @@ private fun SettingsPageContent(
                 title = stringResource(R.string.ui_set_up_7debf9),
                 onBack = onBack,
             ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp)
+                        .padding(top = 8.dp, bottom = 12.dp),
+                ) {
+                    EtaSegmentedControl(
+                        options = hermesModeLabels,
+                        selectedIndex = if (hermesActive) 1 else 0,
+                        onSelectedIndexChange = onSelectHermesMode,
+                    )
+                }
+                if (hermesActive) {
+                    Group {
+                        CouiPreference(
+                            title = stringResource(R.string.hermes_settings_title),
+                            summary = if (hermesConfigured) {
+                                HermesSettings.baseUrl(context)
+                            } else {
+                                stringResource(R.string.hermes_settings_unconfigured)
+                            },
+                            icon = {
+                                CouiSettingsIcon(
+                                    Icons.Rounded.SupportAgent,
+                                    SettingsIconColors.Green,
+                                )
+                            },
+                            onClick = { onNavigate(AppRoute.HermesBackend) },
+                        )
+                    }
+                }
+
+                if (!hermesActive) {
                 Group(title = stringResource(R.string.settings_llm_providers)) {
                     CouiPreference(
                         title = stringResource(R.string.ui_model_provider_e8c7f5),
@@ -446,6 +531,7 @@ private fun SettingsPageContent(
                         onClick = { onNavigate(AppRoute.Characters) },
                     )
                 }
+                }
 
                 Group(title = stringResource(R.string.ui_tool_a72ef1)) {
                     CouiPreference(
@@ -454,26 +540,28 @@ private fun SettingsPageContent(
                         onClick = { onNavigate(AppRoute.Tools) },
                     )
                     CouiIconDivider()
-                    SwitchPref(
-                        context = context,
-                        prefs = agentPrefs,
-                        title = stringResource(R.string.ui_enable_web_browsing_tools_8b6b03),
-                        key = Prefs.Keys.AGENT_BROWSER_TOOLS,
-                        icon = Icons.Rounded.Language,
-                        iconTint = SettingsIconColors.Blue,
-                    )
-                    CouiIconDivider()
-                    CouiPreference(
-                        title = stringResource(R.string.web_tools_settings_title),
-                        icon = {
-                            CouiSettingsIcon(
-                                Icons.Rounded.TravelExplore,
-                                SettingsIconColors.Blue,
-                            )
-                        },
-                        onClick = { onNavigate(AppRoute.WebToolsSettings) },
-                    )
-                    CouiIconDivider()
+                    if (!hermesActive) {
+                        SwitchPref(
+                            context = context,
+                            prefs = agentPrefs,
+                            title = stringResource(R.string.ui_enable_web_browsing_tools_8b6b03),
+                            key = Prefs.Keys.AGENT_BROWSER_TOOLS,
+                            icon = Icons.Rounded.Language,
+                            iconTint = SettingsIconColors.Blue,
+                        )
+                        CouiIconDivider()
+                        CouiPreference(
+                            title = stringResource(R.string.web_tools_settings_title),
+                            icon = {
+                                CouiSettingsIcon(
+                                    Icons.Rounded.TravelExplore,
+                                    SettingsIconColors.Blue,
+                                )
+                            },
+                            onClick = { onNavigate(AppRoute.WebToolsSettings) },
+                        )
+                        CouiIconDivider()
+                    }
                     SwitchPref(
                         context = context,
                         prefs = agentPrefs,
@@ -576,6 +664,80 @@ private fun SettingsPageContent(
                             iconTint = SettingsIconColors.Green,
                         )
                     }
+                }
+
+                Group(title = stringResource(R.string.settings_assistant_context)) {
+                    CouiDropdownPreference(
+                        title = stringResource(R.string.settings_assistant_context_timing),
+                        summary = stringResource(R.string.settings_assistant_context_timing_summary),
+                        items = assistantContextTimingItems,
+                        selectedIndex = assistantContextTiming.ordinal,
+                        onSelectedIndexChange = onAssistantContextTimingSelect,
+                        icon = { CouiSettingsIcon(Icons.Rounded.Schedule, SettingsIconColors.Blue) },
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_screenshot),
+                        key = AssistantContextPart.SCREENSHOT.key,
+                        icon = Icons.Rounded.Screenshot,
+                        iconTint = SettingsIconColors.Blue,
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_ui_text),
+                        key = AssistantContextPart.UI_TEXT.key,
+                        icon = Icons.Rounded.TextFields,
+                        iconTint = SettingsIconColors.Green,
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_ui_structure),
+                        key = AssistantContextPart.UI_STRUCTURE.key,
+                        icon = Icons.Rounded.AccountTree,
+                        iconTint = SettingsIconColors.Blue,
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_foreground_app),
+                        key = AssistantContextPart.FOREGROUND_APP.key,
+                        icon = Icons.Rounded.Apps,
+                        iconTint = SettingsIconColors.Orange,
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_captured_at),
+                        key = AssistantContextPart.CAPTURED_AT.key,
+                        icon = Icons.Rounded.Schedule,
+                        iconTint = SettingsIconColors.Blue,
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_web),
+                        key = AssistantContextPart.WEB.key,
+                        icon = Icons.Rounded.Language,
+                        iconTint = SettingsIconColors.Green,
+                    )
+                    CouiIconDivider()
+                    SwitchPref(
+                        context = context,
+                        prefs = agentPrefs,
+                        title = stringResource(R.string.settings_assistant_context_app_data),
+                        key = AssistantContextPart.APP_DATA.key,
+                        icon = Icons.Rounded.DataObject,
+                        iconTint = SettingsIconColors.Orange,
+                    )
                 }
 
                 if (prefs != null || hasConnectedFramework) {
@@ -825,6 +987,43 @@ private fun SettingsPageContent(
                 title = stringResource(R.string.ui_set_up_7debf9),
                 onBack = onBack,
             ) {
+                item(key = "section_hermes") {
+                    Column {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp)
+                                .padding(top = 8.dp, bottom = 12.dp),
+                        ) {
+                            EtaSegmentedControl(
+                                options = hermesModeLabels,
+                                selectedIndex = if (hermesActive) 1 else 0,
+                                onSelectedIndexChange = onSelectHermesMode,
+                            )
+                        }
+                        if (hermesActive) {
+                            SettingsGroupCard {
+                                ArrowPreference(
+                                    title = stringResource(R.string.hermes_settings_title),
+                                    summary = if (hermesConfigured) {
+                                        HermesSettings.baseUrl(context)
+                                    } else {
+                                        stringResource(R.string.hermes_settings_unconfigured)
+                                    },
+                                    startAction = {
+                                        SettingsIcon(
+                                            icon = Icons.Rounded.SupportAgent,
+                                            tint = SettingsIconColors.Green,
+                                        )
+                                    },
+                                    onClick = { onNavigate(AppRoute.HermesBackend) },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (!hermesActive) {
                 item(key = "section_agent") {
                     SmallTitle(stringResource(R.string.settings_llm_providers))
                     SettingsGroupCard {
@@ -913,6 +1112,7 @@ private fun SettingsPageContent(
                         )
                     }
                 }
+                }
 
                 item(key = "section_tools") {
                     SmallTitle(stringResource(R.string.ui_tool_a72ef1))
@@ -922,24 +1122,26 @@ private fun SettingsPageContent(
                             startAction = { SettingsIcon(Icons.Rounded.Dashboard, tint = SettingsIconColors.Green) },
                             onClick = { onNavigate(AppRoute.Tools) },
                         )
-                        SwitchPref(
-                            context = context,
-                            prefs = agentPrefs,
-                            title = stringResource(R.string.ui_enable_web_browsing_tools_8b6b03),
-                            key = Prefs.Keys.AGENT_BROWSER_TOOLS,
-                            icon = Icons.Rounded.Language,
-                            iconTint = SettingsIconColors.Blue,
-                        )
-                        ArrowPreference(
-                            title = stringResource(R.string.web_tools_settings_title),
-                            startAction = {
-                                SettingsIcon(
-                                    icon = Icons.Rounded.TravelExplore,
-                                    tint = SettingsIconColors.Blue,
-                                )
-                            },
-                            onClick = { onNavigate(AppRoute.WebToolsSettings) },
-                        )
+                        if (!hermesActive) {
+                            SwitchPref(
+                                context = context,
+                                prefs = agentPrefs,
+                                title = stringResource(R.string.ui_enable_web_browsing_tools_8b6b03),
+                                key = Prefs.Keys.AGENT_BROWSER_TOOLS,
+                                icon = Icons.Rounded.Language,
+                                iconTint = SettingsIconColors.Blue,
+                            )
+                            ArrowPreference(
+                                title = stringResource(R.string.web_tools_settings_title),
+                                startAction = {
+                                    SettingsIcon(
+                                        icon = Icons.Rounded.TravelExplore,
+                                        tint = SettingsIconColors.Blue,
+                                    )
+                                },
+                                onClick = { onNavigate(AppRoute.WebToolsSettings) },
+                            )
+                        }
                         SwitchPref(
                             context = context,
                             prefs = agentPrefs,

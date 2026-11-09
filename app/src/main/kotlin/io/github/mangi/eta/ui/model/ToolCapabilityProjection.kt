@@ -22,10 +22,23 @@ internal fun actualToolName(id: String): String = when (id) {
     else -> id
 }
 
-internal fun projectToolGroups(groups: List<ToolGroupUi>, showAll: Boolean, rootGranted: Boolean, colorOs: Boolean): List<ToolGroupUi> =
-    groups.map { group ->
-        group.copy(tools = group.tools.filter { showAll || visibleOnCurrentDevice(it.id, rootGranted, colorOs) })
-    }.filter { it.tools.isNotEmpty() }
+/** Hermes 自带网页与记忆能力，Hermes 模式下本机不再提供这两组工具。 */
+private val HERMES_PROVIDED_GROUP_IDS = setOf("web", "memory")
+
+internal fun projectToolGroups(
+    groups: List<ToolGroupUi>,
+    showAll: Boolean,
+    rootGranted: Boolean,
+    colorOs: Boolean,
+    hermesMode: Boolean = false,
+): List<ToolGroupUi> =
+    groups.asSequence()
+        .filter { !hermesMode || it.id !in HERMES_PROVIDED_GROUP_IDS }
+        .map { group ->
+            group.copy(tools = group.tools.filter { showAll || visibleOnCurrentDevice(it.id, rootGranted, colorOs) })
+        }
+        .filter { it.tools.isNotEmpty() }
+        .toList()
 
 /** 普通权限的缺失优先给出可执行的授权入口，查看增强说明本身不会请求 Root。 */
 internal fun toolCardAction(id: String, capabilities: AgentToolCapabilities): AgentToolsAction? {

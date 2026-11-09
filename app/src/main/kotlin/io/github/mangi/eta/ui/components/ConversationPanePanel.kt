@@ -36,6 +36,7 @@ import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.SportsBar
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Widgets
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -50,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -63,6 +65,7 @@ import com.itos.coui.menu.couiMenuAnchor
 import com.itos.coui.menu.rememberCouiMenuAnchor
 import com.itos.coui.shape.CouiShape
 import com.itos.coui.theme.CouiTheme
+import io.github.mangi.eta.agent.hermes.HermesConversationMirror
 import io.github.mangi.eta.R
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.ui.app.LocalUiStyle
@@ -148,6 +151,7 @@ internal fun ConversationPanePanel(
     onOpenSkills: () -> Unit,
     onOpenCharacters: () -> Unit,
     onOpenPermissions: () -> Unit,
+    onSyncHermes: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // state.conversations 已由 AgentAppState 按标题、预览与消息内容过滤。
@@ -241,6 +245,7 @@ internal fun ConversationPanePanel(
                         onOpenSkills = onOpenSkills,
                         onOpenCharacters = onOpenCharacters,
                         onOpenPermissions = onOpenPermissions,
+                        onSyncHermes = onSyncHermes,
                     )
                     Spacer(Modifier.height(ConversationPanelMetrics.BottomInset))
                 }
@@ -615,7 +620,12 @@ private fun PaneDock(
     onOpenSkills: () -> Unit,
     onOpenCharacters: () -> Unit,
     onOpenPermissions: () -> Unit,
+    onSyncHermes: () -> Unit,
 ) {
+    // Hermes 模式下模型、工具集、技能、角色都由服务端决定，本地这几个入口只会误导。
+    // 设置（含后端配置）与权限（Android 运行时权限，手机工具要用）保留。
+    val context = LocalContext.current
+    val hermesMode = remember(context) { HermesConversationMirror.isActive(context) }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -626,36 +636,51 @@ private fun PaneDock(
             onClick = onOpenSettings,
             modifier = Modifier.weight(1f),
         )
-        DockEntry(
-            icon = Icons.Outlined.Cloud,
-            label = "模型",
-            onClick = onOpenModelProviders,
-            modifier = Modifier.weight(1f),
-        )
+        if (!hermesMode) {
+            DockEntry(
+                icon = Icons.Outlined.Cloud,
+                label = "模型",
+                onClick = onOpenModelProviders,
+                modifier = Modifier.weight(1f),
+            )
+        }
         DockEntry(
             icon = Icons.Outlined.Widgets,
             label = "工具",
             onClick = onOpenTools,
             modifier = Modifier.weight(1f),
         )
-        DockEntry(
-            icon = Icons.Outlined.AutoStories,
-            label = "Skills",
-            onClick = onOpenSkills,
-            modifier = Modifier.weight(1f),
-        )
+        if (!hermesMode) {
+            DockEntry(
+                icon = Icons.Outlined.AutoStories,
+                label = "Skills",
+                onClick = onOpenSkills,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        // 会话列表的真源在服务端时才需要手动同步；本地模式下没有可拉的远端。
+        if (hermesMode) {
+            DockEntry(
+                icon = Icons.Outlined.Sync,
+                label = "同步",
+                onClick = onSyncHermes,
+                modifier = Modifier.weight(1f),
+            )
+        }
         DockEntry(
             icon = Icons.Outlined.Shield,
             label = "权限",
             onClick = onOpenPermissions,
             modifier = Modifier.weight(1f),
         )
-        DockEntry(
-            icon = Icons.Outlined.SportsBar,
-            label = "角色",
-            onClick = onOpenCharacters,
-            modifier = Modifier.weight(1f),
-        )
+        if (!hermesMode) {
+            DockEntry(
+                icon = Icons.Outlined.SportsBar,
+                label = "角色",
+                onClick = onOpenCharacters,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 

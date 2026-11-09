@@ -26,8 +26,23 @@ class ToolCapabilityProjectionTest {
         assertTrue(projectToolGroups(groups, false, false, false).isEmpty())
     }
 
-    @Test fun browserCardsReferToTheRealBrowserTool() {
-        listOf("browser_use", "browser_read", "browser_interact", "browser_screenshot").forEach { id ->
+    @Test fun hermesModeHidesToolsHermesProvides() {
+        val groups = listOf(
+            ToolGroupUi("web", "网页", listOf(card("web_search"))),
+            ToolGroupUi("memory", "记忆", listOf(card("memory_get"))),
+            ToolGroupUi("terminal", "终端", listOf(card("terminal"))),
+        )
+        assertEquals(
+            listOf("terminal"),
+            projectToolGroups(groups, true, true, true, hermesMode = true).map { it.id },
+        )
+        assertEquals(
+            listOf("web", "memory", "terminal"),
+            projectToolGroups(groups, true, true, true).map { it.id },
+        )
+    }
+
+    @Test fun browserCardsReferToTheRealBrowserTool() {        listOf("browser_use", "browser_read", "browser_interact", "browser_screenshot").forEach { id ->
             assertEquals("browser_use", actualToolName(id))
             assertEquals(AgentToolRequirements.find("browser_use"), toolCardRequirement(id))
         }

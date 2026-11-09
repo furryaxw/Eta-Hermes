@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.graphics.Bitmap
 import android.service.voice.VoiceInteractionSession
 import android.view.View
+import io.github.mangi.eta.config.Prefs
 
 /**
  * 系统数字助理的入口桥接。
@@ -45,6 +46,7 @@ internal class EtaVoiceInteractionSession(context: Context) : VoiceInteractionSe
         screenContext = EtaAssistantScreenContexts.begin(
             showFlags,
             args?.getParcelableArrayList(KEY_FOREGROUND_ACTIVITIES, ComponentName::class.java).orEmpty(),
+            Prefs.assistantContextPolicy(),
         )
     }
 

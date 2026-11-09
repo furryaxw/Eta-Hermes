@@ -54,6 +54,7 @@ import io.github.mangi.eta.agent.runtime.AgentExternalArchivePayload
 import io.github.mangi.eta.agent.runtime.AgentRuntimeClient
 import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
 import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.data.model.AppearanceSettings
 import io.github.mangi.eta.data.repository.AppearanceSettingsRepository
 import io.github.mangi.eta.ui.MainActivity
@@ -478,6 +479,8 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         speechState = EtaSpeechState()
         playback.stop()
         val capture = entryScreenContext
+        // 会话是否已经开始由本条之前的用户轮次决定，所以要在追加本条之前算。
+        val conversationStarted = uiState.messages.any { it is UserMessageUi }
         inputText = ""
         activeRunId = UUID.randomUUID().toString()
         val runId = activeRunId ?: return
@@ -492,7 +495,12 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         updateSoftInput(visible = false)
         runJob = scope.launch {
             val speechConfig = if (fromSpeech) SpeechSettingsRepository.settings() else null
-            val screen = capture?.snapshot() ?: EtaAssistantScreenContext.Snapshot()
+            val attachContext = Prefs.assistantContextPolicy().shouldAttach(conversationStarted)
+            val screen = if (attachContext) {
+                capture?.snapshot() ?: EtaAssistantScreenContext.Snapshot()
+            } else {
+                EtaAssistantScreenContext.Snapshot()
+            }
             val runImages = listOfNotNull(screen.image)
             val config = AgentModelClient.loadConfig()
             val payload = AgentExternalArchivePayload(

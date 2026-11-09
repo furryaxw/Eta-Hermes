@@ -84,6 +84,7 @@ fun ConversationSidePaneScaffold(
     onOpenSkills: () -> Unit,
     onOpenCharacters: () -> Unit,
     onOpenPermissions: () -> Unit,
+    onSyncHermes: () -> Unit,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit,
 ) {
@@ -237,6 +238,7 @@ fun ConversationSidePaneScaffold(
                         onOpenSkills = onOpenSkills,
                         onOpenCharacters = onOpenCharacters,
                         onOpenPermissions = onOpenPermissions,
+                        onSyncHermes = onSyncHermes,
                         modifier = Modifier
                             .focusProperties { onEnter = { if (!isRevealed) cancelFocusChange() } }
                             .focusGroup()

@@ -1,0 +1,75 @@
+# Example nginx site for exposing Hermes to Eta.
+#
+# Assumes:
+#   - Hermes API server on 127.0.0.1:8642 (API_SERVER_ENABLED=true)
+#   - eta bridge on 127.0.0.1:8765 (bridge.py)
+#   - TLS terminated here (certbot / your own certs)
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name hermes.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/hermes.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hermes.example.com/privkey.pem;
+
+    # 手机上传截图时放宽
+    client_max_body_size 32m;
+
+    # ---- 对话/控制面：Eta -> Hermes API server --------------------------
+    # /hermes/api/sessions  ->  /api/sessions
+    # /hermes/v1/runs       ->  /v1/runs
+    location /hermes/ {
+        proxy_pass http://127.0.0.1:8642/;
+        proxy_http_version 1.1;
+
+        # SSE 必须关缓冲，否则流式回复会整段卡住
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_request_buffering off;
+        chunked_transfer_encoding on;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+
+        # Authorization: Bearer <API_SERVER_KEY> 由 Eta 自己带，nginx 不动
+        # 不要在这里加 proxy_set_header Authorization ""，会把 key 吃掉
+
+        proxy_connect_timeout 10s;
+        proxy_send_timeout   3600s;
+        proxy_read_timeout   3600s;
+
+        # 避免压缩层重新缓冲 SSE
+        gzip off;
+    }
+
+    # ---- 工具面：Eta -> bridge（反向工具通道） --------------------------
+    location /eta/bridge {
+        proxy_pass http://127.0.0.1:8765/eta/bridge;
+        proxy_http_version 1.1;
+
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 长连接：手机断网重连前尽量不主动切
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # 健康检查只给本机看，不要暴露
+    location = /eta/healthz {
+        return 404;
+    }
+}

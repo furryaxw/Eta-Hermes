@@ -8,6 +8,8 @@ import android.os.Looper
 import io.github.mangi.eta.agent.skill.SkillRuntime
 import io.github.mangi.eta.agent.browser.BrowserSessionRegistry
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.hermes.HermesBridgeService
+import io.github.mangi.eta.agent.hermes.HermesMode
 import io.github.mangi.eta.agent.terminal.TerminalRuntime
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
@@ -80,6 +82,8 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
                 )
             }
         }
+        HermesMode.refresh(this)
+        HermesBridgeService.sync(this)
     }
 
     override fun onTrimMemory(level: Int) {

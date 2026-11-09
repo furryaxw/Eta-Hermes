@@ -1,0 +1,16 @@
+# Hermes side — append to ~/.hermes/config.yaml
+#
+# The bridge is loopback-only; Hermes reaches it at 127.0.0.1:8765/mcp.
+# Tools register as mcp_eta_<name> and are picked up by every platform,
+# including api_server (see hermes_cli/tools_config.py::_merge_mcp_servers).
+
+mcp_servers:
+  eta:
+    url: "http://127.0.0.1:8765/mcp"
+    # Tool calls may drive the phone UI; give them room.
+    timeout: 300
+    connect_timeout: 20
+    # Optional: pin a subset by tool name once things settle.
+    # tools:
+    #   include: ["device_info", "notification_list", "calendar_read"]
+    #   exclude: ["gui_tap"]

@@ -8,6 +8,8 @@ import android.service.voice.VoiceInteractionSession
 import io.github.mangi.eta.agent.media.AgentImageCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AssistantScreenContextProjection
+import io.github.mangi.eta.config.AssistantContextPart
+import io.github.mangi.eta.config.AssistantContextPolicy
 import io.github.mangi.eta.core.AndroidAgentLogger
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
@@ -22,6 +24,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal class EtaAssistantScreenContext(
     showFlags: Int,
     private val foregroundApps: List<ComponentName>,
+    private val policy: AssistantContextPolicy = AssistantContextPolicy(),
 ) {
     val id: String = UUID.randomUUID().toString()
     private val capturedAt = System.currentTimeMillis()
@@ -32,8 +35,10 @@ internal class EtaAssistantScreenContext(
     private val receivedActivities = mutableSetOf<Int>()
     private var expectedActivities = 1
     private var pendingActivities = 0
-    private var assistComplete = showFlags and VoiceInteractionSession.SHOW_WITH_ASSIST == 0
-    private var screenshotComplete = showFlags and VoiceInteractionSession.SHOW_WITH_SCREENSHOT == 0
+    private var assistComplete = !policy.needsAssistStructure ||
+        showFlags and VoiceInteractionSession.SHOW_WITH_ASSIST == 0
+    private var screenshotComplete = !policy.needsScreenshot ||
+        showFlags and VoiceInteractionSession.SHOW_WITH_SCREENSHOT == 0
     private var screenshotReceived = false
     private var image: AgentModelClient.ModelImage? = null
     private var closed = false
@@ -41,6 +46,7 @@ internal class EtaAssistantScreenContext(
     init { completeIfReady() }
 
     fun acceptAssist(context: Context, state: VoiceInteractionSession.AssistState) {
+        if (!policy.needsAssistStructure) return
         synchronized(this) {
             if (closed || state.index in receivedActivities) return
             if (receivedActivities.size >= MAX_ACTIVITIES && !state.isFocused) return
@@ -50,7 +56,7 @@ internal class EtaAssistantScreenContext(
         }
         scope.launch {
             val text = try {
-                EtaAssistContentReader.read(context, state)
+                EtaAssistContentReader.read(context, state, policy)
             } catch (exception: Exception) {
                 AndroidAgentLogger.warn("助理应用上下文解析失败: type=${exception.javaClass.simpleName}")
                 "应用内容读取失败"
@@ -66,6 +72,10 @@ internal class EtaAssistantScreenContext(
     }
 
     fun acceptScreenshot(bitmap: Bitmap?) {
+        if (!policy.needsScreenshot) {
+            bitmap?.recycle()
+            return
+        }
         synchronized(this) {
             if (closed || screenshotReceived) {
                 bitmap?.recycle()
@@ -97,17 +107,23 @@ internal class EtaAssistantScreenContext(
         return synchronized(this) {
             if (closed) return@synchronized Snapshot()
             val text = buildString {
-                appendLine("采集时间（Unix 毫秒）：$capturedAt；这是助理唤醒时的画面，不代表操作后的实时状态。")
-                if (foregroundApps.isNotEmpty()) {
+                if (policy.includes(AssistantContextPart.CAPTURED_AT)) {
+                    appendLine("采集时间（Unix 毫秒）：$capturedAt；这是助理唤醒时的画面，不代表操作后的实时状态。")
+                }
+                if (policy.includes(AssistantContextPart.FOREGROUND_APP) && foregroundApps.isNotEmpty()) {
                     appendLine("前台应用：" + foregroundApps.take(MAX_ACTIVITIES)
                         .joinToString { it.flattenToShortString().take(512) })
                 }
-                appendLine(if (image != null) "本次已附屏幕截图。" else "系统未提供可用截图。")
-                if (activities.isEmpty()) appendLine("系统尚未提供应用内容。")
+                // 附图时不再复述：图片本身就是证据。
+                if (policy.needsScreenshot && image == null) appendLine("系统未提供可用截图。")
+                if (activities.isEmpty() && policy.needsAssistStructure) appendLine("系统尚未提供应用内容。")
                 activities.entries.sortedWith(compareByDescending<Map.Entry<Int, Pair<Boolean, String>>> { it.value.first }
                     .thenBy { it.key }).take(MAX_ACTIVITIES).forEach { appendLine(it.value.second) }
             }
-            Snapshot(AssistantScreenContextProjection.bound(text), image)
+            Snapshot(
+                AssistantScreenContextProjection.bound(text),
+                if (policy.needsScreenshot) image else null,
+            )
         }
     }
 
@@ -138,9 +154,13 @@ internal object EtaAssistantScreenContexts {
     private var current: EtaAssistantScreenContext? = null
 
     @Synchronized
-    fun begin(flags: Int, foregroundApps: List<ComponentName>): EtaAssistantScreenContext {
+    fun begin(
+        flags: Int,
+        foregroundApps: List<ComponentName>,
+        policy: AssistantContextPolicy = AssistantContextPolicy(),
+    ): EtaAssistantScreenContext {
         current?.close()
-        return EtaAssistantScreenContext(flags, foregroundApps).also { current = it }
+        return EtaAssistantScreenContext(flags, foregroundApps, policy).also { current = it }
     }
 
     @Synchronized

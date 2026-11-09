@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -27,6 +28,7 @@ import com.itos.coui.text.CouiTextKind
 import com.itos.coui.text.Text as CouiText
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.tool.AgentToolCapabilities
+import io.github.mangi.eta.agent.hermes.HermesMode
 import io.github.mangi.eta.data.model.AppearanceUiStyle
 import io.github.mangi.eta.ui.app.LocalUiStyle
 import io.github.mangi.eta.ui.app.rememberDeviceCapabilities
@@ -56,10 +58,17 @@ fun AgentToolsScreen(
     modifier: Modifier = Modifier,
 ) {
     val capabilities = rememberDeviceCapabilities()
+    val hermesActive by HermesMode.enabled.collectAsState()
     var showAll by rememberSaveable { mutableStateOf(false) }
     val currentListState = rememberLazyListState()
     val allListState = rememberLazyListState()
-    val groups = projectToolGroups(state.groups, showAll, capabilities.root.isGranted, capabilities.tools.colorOs)
+    val groups = projectToolGroups(
+        state.groups,
+        showAll,
+        capabilities.root.isGranted,
+        capabilities.tools.colorOs,
+        hermesActive,
+    )
     val tabs = listOf(
         false to stringResource(R.string.capability_current_device),
         true to stringResource(R.string.capability_all),

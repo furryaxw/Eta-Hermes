@@ -40,8 +40,13 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.itos.coui.effect.LocalCouiContourGlowEnabled
 import io.github.mangi.eta.EtaApp
+import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.hermes.HermesApiClient
+import io.github.mangi.eta.agent.hermes.HermesRunExecutor
+import io.github.mangi.eta.agent.hermes.HermesSettings
+import io.github.mangi.eta.agent.hermes.hermesSessionKey
 import io.github.mangi.eta.agent.media.AgentImageCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.overlay.AgentHapticFeedback
@@ -481,16 +486,34 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
     }
 
     private fun executeRun(run: RuntimeRunRegistry.Run) {
-        val outcome = AgentRuntimeRunExecutor(
-            context = this,
-            guiControl = guiControl,
-            currentPermissions = ::currentRuntimePermissions,
-            snapshotRequest = run::snapshotRequest,
-            onAcceptedEvent = { event, _ ->
-                handleAcceptedRunEvent(run, event)
-            },
-            persistArtifacts = ::persistRunArtifacts,
-        ).execute(run.session, run.request)
+        val outcome = if (HermesSettings.isEnabled(this)) {
+            if (!HermesSettings.isChatConfigured(this)) {
+                failBeforeExecution(run, getString(R.string.hermes_settings_run_unconfigured))
+                return
+            }
+            HermesRunExecutor(
+                client = HermesApiClient(
+                    context = this,
+                    baseUrl = HermesSettings.baseUrl(this),
+                    authToken = HermesSettings.authToken(this),
+                    trustSelfSigned = HermesSettings.isTrustingSelfSigned(this),
+                ),
+                sessionId = hermesSessionKey(run.request),
+                snapshotRequest = run::snapshotRequest,
+                persistArtifacts = ::persistRunArtifacts,
+            ).execute(run.session, run.request)
+        } else {
+            AgentRuntimeRunExecutor(
+                context = this,
+                guiControl = guiControl,
+                currentPermissions = ::currentRuntimePermissions,
+                snapshotRequest = run::snapshotRequest,
+                onAcceptedEvent = { event, _ ->
+                    handleAcceptedRunEvent(run, event)
+                },
+                persistArtifacts = ::persistRunArtifacts,
+            ).execute(run.session, run.request)
+        }
         if (!outcome.shouldUpdateHost) return
         postTerminalOverlay(
             run = run,

@@ -136,6 +136,9 @@ internal class AgentAppState(
 
     private var selectedConversationId: String? = initialConversations.selectedConversationId
     private var conversationsById: Map<String, AgentChatHomeUiState> = initialConversations.conversationsById
+
+    /** `sessions.changed` 可能连着来，限制重拉频率。 */
+    private var lastHermesSessionRefreshAt = 0L
     private var conversationTitles: Map<String, String> = initialConversations.titles
     private var conversationUpdatedAt: Map<String, Long> = initialConversations.updatedAt
     private var conversationPinnedIds: Set<String> = initialConversations.pinnedIds
@@ -160,6 +163,20 @@ internal class AgentAppState(
     init {
         refreshConversationSummaries()
         observeRuntimeSelection()
+        // Hermes 那边新开/删除会话时，列表跟着动，不用重启 App。
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            runCatching {
+                io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext).onEvent = { event ->
+                    if (event.name == "sessions.changed") refreshHermesSessions()
+                }
+            }
+        }
+        // 改了后端地址或重新登录：立刻按新模式重建会话状态，而不是等下次启动。
+        scope.launch {
+            io.github.mangi.eta.agent.hermes.HermesBackendEvents.changed.collect {
+                withContext(Dispatchers.Main) { reloadForBackendChange() }
+            }
+        }
         runtimeRecoveryInProgress.set(true)
         scope.launch(Dispatchers.IO) {
             try {
@@ -577,7 +594,11 @@ internal class AgentAppState(
         val existing = conversationsById[conversationId] ?: return
         if (AgentRuntimeHistoryReducer.wasApplied(existing, runId) ||
             !runStore.register(runId, conversationId)) return
-        val restored = if (operation == AgentRuntimeWire.OP_REWRITE_REPLY) {
+        val restored = if (
+            operation == AgentRuntimeWire.OP_REWRITE_REPLY &&
+            // Hermes 模式的重写由服务端负责，本地 pending-rewrite 回放只会给出压缩提示和旧内容。
+            !io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)
+        ) {
             RoleplayConversationReducer.restorePendingRewrite(existing, runId, rewriteTargetMessageId)
         } else existing
         updateConversation(conversationId, restored.copy(isStreaming = true, isCompacting = operation == AgentRuntimeWire.OP_COMPACT))
@@ -985,7 +1006,144 @@ internal class AgentAppState(
         }
     }
 
+    /**
+     * 后端配置变了：按当前模式重新装载整套会话状态。
+     *
+     * 本地模式 ↔ Hermes 模式的切换也走这里，所以不能只刷列表，必须整体替换。
+     */
+    private fun reloadForBackendChange() {
+        scope.launch {
+            // 设置页刚改完地址/令牌，服务还在建连：等一下再拉，别把列表清空。
+            delay(1200)
+            val snapshot = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+                        io.github.mangi.eta.agent.hermes.HermesConversationMirror.snapshot(appContext)
+                    } else {
+                        AgentConversationStore.load(appContext)
+                    }
+                }.getOrNull()
+            } ?: return@launch
+            withContext(Dispatchers.Main) {
+                conversationSelectionJob?.cancel()
+                conversationSelectionVersion += 1
+                cancelHistoryPageLoad()
+                conversationsById = snapshot?.conversationsById.orEmpty()
+                conversationTitles = snapshot?.titles.orEmpty()
+                conversationUpdatedAt = snapshot?.updatedAt.orEmpty()
+                conversationPinnedIds = snapshot?.pinnedIds.orEmpty()
+                selectedConversationId = snapshot?.selectedConversationId
+                homeState = selectedConversationId?.let { conversationsById[it] }
+                    ?: emptyChatState(defaultThinkingEnabled)
+                isLoadingConversation = false
+                conversationLoadFailed = false
+                conversationPaneState = conversationPaneState.copy(
+                    selectedConversationId = selectedConversationId,
+                )
+                refreshConversationSummaries()
+            }
+        }
+    }
+
+    /**
+     * 从服务端重拉会话列表（Hermes 模式）。
+     *
+     * 只做增删与标题/时间同步，已加载会话的正文状态原样保留；正在跑的会话不受影响。
+     */
+    fun refreshHermesSessions(
+        force: Boolean = false,
+        onDone: (Boolean) -> Unit = {},
+    ) {
+        if (!io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            onDone(false)
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (!force && now - lastHermesSessionRefreshAt < HERMES_SESSION_REFRESH_THROTTLE_MS) return
+        lastHermesSessionRefreshAt = now
+        scope.launch {
+            val snapshot = withContext(Dispatchers.IO) {
+                runCatching {
+                    io.github.mangi.eta.agent.hermes.HermesConversationMirror.snapshot(appContext)
+                }.getOrNull()
+            }
+            if (snapshot == null) {
+                withContext(Dispatchers.Main) { onDone(false) }
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                val incoming = snapshot.conversationsById
+                incoming.forEach { (id, state) ->
+                    if (id !in conversationsById) conversationsById = conversationsById + (id to state)
+                }
+                (conversationsById.keys - incoming.keys).forEach { id ->
+                    val state = conversationsById[id]
+                    if (id != selectedConversationId && state?.isStreaming != true) {
+                        conversationsById = conversationsById - id
+                        conversationTitles = conversationTitles - id
+                        conversationUpdatedAt = conversationUpdatedAt - id
+                    }
+                }
+                conversationTitles = conversationTitles + snapshot.titles
+                conversationUpdatedAt = conversationUpdatedAt + snapshot.updatedAt
+                refreshConversationSummaries()
+                onDone(true)
+            }
+        }
+    }
+
+    /** 侧栏手动同步：跳过节流，结果直接反馈给用户。 */
+    fun syncHermesSessions() {
+        refreshHermesSessions(force = true) { ok ->
+            Toast.makeText(
+                appContext,
+                appContext.getString(
+                    if (ok) R.string.conversation_sync_done else R.string.conversation_sync_failed,
+                ),
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
+    }
+
     fun createConversation() {
+        // Hermes 模式下"新建"要立刻拿到服务端 id：否则本地 conv-uuid 与列表里的
+        // stored_session_id 不是同一个，发完消息才发现会话多出来一条。
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            scope.launch {
+                val ids = withContext(Dispatchers.IO) {
+                    runCatching {
+                        io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext).createNew("")
+                    }.getOrNull()
+                }
+                withContext(Dispatchers.Main) {
+                    val stored = ids?.first
+                    if (stored == null) {
+                        Toast.makeText(appContext, "无法创建 Hermes 会话", Toast.LENGTH_SHORT).show()
+                        return@withContext
+                    }
+                    conversationSelectionVersion += 1
+                    cancelHistoryPageLoad()
+                    conversationSelectionJob?.cancel()
+                    isLoadingConversation = false
+                    conversationLoadFailed = false
+                    if (homeState.messageEdit != null) cancelMessageEdit()
+                    fileAttachmentOwnerVersion += 1
+                    val state = emptyChatState(defaultThinkingEnabled).copy(isConversationLoaded = true)
+                    conversationsById = conversationsById + (stored to state)
+                    conversationTitles = conversationTitles + (stored to "")
+                    conversationUpdatedAt = conversationUpdatedAt + (stored to System.currentTimeMillis())
+                    selectedConversationId = stored
+                    homeState = state
+                    refreshConversationModel()
+                    conversationPaneState = conversationPaneState.copy(
+                        selectedConversationId = stored,
+                        searchQuery = "",
+                    )
+                    refreshConversationSummaries()
+                }
+            }
+            return
+        }
         conversationSelectionVersion += 1
         cancelHistoryPageLoad()
         conversationSelectionJob?.cancel()
@@ -1053,6 +1211,17 @@ internal class AgentAppState(
     private fun deleteSettledConversation(conversationId: String) {
         pendingConversationDeletes.remove(conversationId)
         BrowserSessionRegistry.requestRemove(conversationId)
+        // Hermes 模式下会话真源在服务端：本地移除之外还要删掉服务端那一份。
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            scope.launch {
+                runCatching {
+                    io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                        .deleteSession(conversationId)
+                }
+                io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                    .forgetSession(conversationId)
+            }
+        }
         val wasSelected = selectedConversationId == conversationId
         conversationsById = conversationsById - conversationId
         conversationTitles = conversationTitles - conversationId
@@ -1312,7 +1481,33 @@ internal class AgentAppState(
         pendingFileReferences: List<PendingFileReferenceUi>,
         editBoundary: AgentConversationRevisionReducer.Boundary?,
         preserveCurrentDraft: Boolean = false,
+        hermesFilesResolved: Boolean = false,
     ) {
+        // Hermes 模式下不拼本地路径：先把文件字节传上去，再用服务端返回的 @file 引用发出去。
+        if (!hermesFilesResolved &&
+            pendingFileReferences.isNotEmpty() &&
+            io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)
+        ) {
+            uploadHermesFilesThenSend(
+                conversationId, state, prompt, pendingImages, pendingFileReferences,
+                editBoundary, preserveCurrentDraft,
+            )
+            return
+        }
+        // Hermes 模式下"编辑"完全走服务端截断：不进入 Eta 自己的 rewrite/压缩状态机，
+        // 那条路径会把 rewriteTargetMessageId 当成消息 id，触发压缩提示和原文回放。
+        if (editBoundary != null &&
+            io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)
+        ) {
+            dispatchHermesRewind(
+                conversationId = conversationId,
+                state = state,
+                userMessageIndex = editBoundary.userMessageIndex,
+                prompt = prompt,
+                pendingImages = pendingImages,
+            )
+            return
+        }
         val fileReferences = pendingFileReferences.map { it.reference }
         val runtimePrompt = AgentFileReferencePromptCodec.format(prompt, fileReferences)
         val runId = "run-${UUID.randomUUID()}"
@@ -1377,6 +1572,277 @@ internal class AgentAppState(
             },
             reasoningEffort = state.reasoningEffort,
         )
+    }
+
+    /**
+     * Hermes 模式：把待发文件上传成服务端引用，再把引用拼进文本重发。
+     *
+     * Eta 原本写进 prompt 的是手机上的绝对路径，服务端既读不到、重载后又只能显示成路径串。
+     */
+    private fun uploadHermesFilesThenSend(
+        conversationId: String,
+        state: AgentChatHomeUiState,
+        prompt: String,
+        pendingImages: List<PendingImageUi>,
+        pendingFileReferences: List<PendingFileReferenceUi>,
+        editBoundary: AgentConversationRevisionReducer.Boundary?,
+        preserveCurrentDraft: Boolean,
+    ) {
+        scope.launch {
+            val refs = withContext(Dispatchers.IO) {
+                val rpc = io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                pendingFileReferences.mapNotNull { pending ->
+                    runCatching {
+                        if (pending.reference.kind != io.github.mangi.eta.agent.model.AgentFileReferenceKind.File) {
+                            return@runCatching null
+                        }
+                        val file = java.io.File(pending.reference.absolutePath)
+                        val bytes = file.readBytes()
+                        val encoded = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                        rpc.attachFile(
+                            conversationId,
+                            "data:${mimeForFileName(file.name)};base64,$encoded",
+                            pending.reference.displayName.ifBlank { file.name },
+                        )
+                    }.onFailure {
+                        AndroidAgentLogger.warn("Hermes file.attach failed: ${it.message}")
+                    }.getOrNull()
+                }
+            }
+            withContext(Dispatchers.Main) {
+                val merged = if (refs.isEmpty()) {
+                    prompt
+                } else {
+                    listOf(prompt).filter { it.isNotBlank() }.plus(refs).joinToString("\n\n")
+                }
+                dispatchMessageToConversation(
+                    conversationId = conversationId,
+                    state = state,
+                    prompt = merged,
+                    pendingImages = pendingImages,
+                    pendingFileReferences = emptyList(),
+                    editBoundary = editBoundary,
+                    preserveCurrentDraft = preserveCurrentDraft,
+                    hermesFilesResolved = true,
+                )
+            }
+        }
+    }
+
+    private fun mimeForFileName(name: String): String =
+        when (name.substringAfterLast('.', "").lowercase()) {
+            "txt", "md", "log", "csv" -> "text/plain"
+            "json" -> "application/json"
+            "pdf" -> "application/pdf"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "webp" -> "image/webp"
+            "zip" -> "application/zip"
+            else -> "application/octet-stream"
+        }
+
+    /**
+     * Hermes 模式下的编辑/重试：让服务端截断到该用户轮次并重发，完成后整段重新加载。
+     *
+     * 不走 run/事件管线，是因为 Eta 的 rewrite 语义会把目标当成自己的消息 id，
+     * 从而触发"上下文已被压缩"和原文回放；它的"重新生成"还会退化成新发一条消息。
+     */
+    private fun dispatchHermesRewind(
+        conversationId: String,
+        state: AgentChatHomeUiState,
+        userMessageIndex: Int,
+        prompt: String,
+        pendingImages: List<PendingImageUi>,
+    ) {
+        val ordinal = state.messages
+            .take(userMessageIndex)
+            .count { it is UserMessageUi }
+        val images = pendingImages.map { image ->
+            AgentModelClient.ModelImage(
+                reference = image.dataUrl,
+                mimeType = image.mimeType,
+                bytes = 0,
+            )
+        }
+        // 先把界面截断到目标轮次并插入新文本：服务端跑完前就能看到编辑生效，
+        // 不用等整轮结束或重新进会话。
+        val truncated = state.messages.take(userMessageIndex)
+        val pendingUser = UserMessageUi(
+            id = "user-hermes-${System.currentTimeMillis()}",
+            content = prompt,
+            images = pendingImages.map { it.dataUrl },
+            isEdited = true,
+        )
+        updateConversation(
+            conversationId,
+            state.copy(
+                messages = truncated + pendingUser,
+                isStreaming = true,
+                input = "",
+                pendingImages = emptyList(),
+                pendingFileReferences = emptyList(),
+                messageEdit = null,
+            ),
+        )
+        val reducer = io.github.mangi.eta.agent.hermes.HermesLiveReducer()
+        val liveBase = truncated + pendingUser
+        scope.launch {
+            val outcome = runCatching {
+                withContext(Dispatchers.IO) {
+                    io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                        .rewindAndSubmit(conversationId, ordinal, prompt, images) { event ->
+                            // 边跑边显示：思考/工具/正文都先按事件追加，结束后再整体校准。
+                            reducer.on(event.name, event.data)
+                            val live = reducer.snapshot()
+                            scope.launch(Dispatchers.Main) {
+                                val current = conversationsById[conversationId] ?: return@launch
+                                updateConversation(
+                                    conversationId,
+                                    current.copy(messages = liveBase + live, isStreaming = true),
+                                )
+                            }
+                            true
+                        }
+                }
+            }
+            outcome.exceptionOrNull()?.let { error ->
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        appContext,
+                        error.message ?: "Hermes 编辑失败",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+            // 服务端是唯一真源：截断与重发的结果直接从 history 取回。
+            val reloaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    AgentConversationStore.loadConversation(appContext, conversationId)
+                }.getOrNull()
+            }
+            withContext(Dispatchers.Main) {
+                val current = conversationsById[conversationId] ?: return@withContext
+                updateConversation(
+                    conversationId,
+                    if (reloaded != null) {
+                        reloaded.copy(input = current.input, isConversationLoaded = true)
+                    } else {
+                        current.copy(isStreaming = false)
+                    },
+                )
+            }
+        }
+    }
+
+    /** Hermes 模式下删除某一轮：服务端截断 + 立即中断，然后重新拉历史。 */
+    private fun dispatchHermesDelete(
+        conversationId: String,
+        state: AgentChatHomeUiState,
+        messageId: String,
+    ) {
+        val index = state.messages.indexOfFirst { it.id == messageId }
+        val resolvedIndex = if (index >= 0) {
+            index
+        } else {
+            // 实时轮次的 id 与重载后的 row_id 不是同一套：找不到就按"最后一轮"处理，
+            // 至少不会出现"对话框关了但什么都没删"。
+            AndroidAgentLogger.warn(
+                "Hermes delete: message $messageId not found among ${state.messages.size} messages; using last turn",
+            )
+            if (state.messages.isEmpty()) return else state.messages.lastIndex
+        }
+        val userIndex = (resolvedIndex downTo 0).firstOrNull { state.messages[it] is UserMessageUi }
+            ?: return
+        val ordinal = state.messages.take(userIndex).count { it is UserMessageUi }
+        AndroidAgentLogger.info(
+            "Hermes delete: index=$resolvedIndex userIndex=$userIndex ordinal=$ordinal total=${state.messages.size}",
+        )
+        updateConversation(
+            conversationId,
+            state.copy(
+                messages = state.messages.take(userIndex),
+                isStreaming = true,
+                messageEdit = null,
+            ),
+        )
+        scope.launch {
+            var targetRowId: Long? = null
+            val failure = runCatching {
+                withContext(Dispatchers.IO) {
+                    val rpc = io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                    // 历史消息的 id 就是 row_id：用它精确定位整轮，两条删除路径才会落到同一行。
+                    val rowId = messageId.toLongOrNull()
+                    targetRowId = if (rowId != null) {
+                        rpc.deleteTurn(conversationId, rowId)
+                    } else {
+                        rpc.deleteTurnAtOrdinal(conversationId, ordinal)
+                    }
+                }
+            }.exceptionOrNull()
+            withContext(Dispatchers.Main) {
+                failure?.let {
+                    Toast.makeText(
+                        appContext,
+                        it.message ?: "Hermes 删除失败",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+            // 截断要等服务端落盘，稍后再取一次。
+            delay(800)
+            val messages = withContext(Dispatchers.IO) {
+                runCatching {
+                    val rpc = io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                    io.github.mangi.eta.agent.hermes.HermesConversationMirror.messagesFrom(
+                        rpc.historyMessages(conversationId),
+                        targetRowId,
+                    )
+                }.getOrNull()
+            }
+            withContext(Dispatchers.Main) {
+                val current = conversationsById[conversationId] ?: return@withContext
+                // 整轮删空：会话本身也没有意义了，直接回到新会话界面。
+                // 不能走 deleteSettledConversation：它会自动选中并加载下一个会话，
+                // 那个会话若 resume 失败就会把界面带进"加载失败"。
+                if (messages != null && messages.isEmpty()) {
+                    val wasSelected = selectedConversationId == conversationId
+                    conversationsById = conversationsById - conversationId
+                    conversationTitles = conversationTitles - conversationId
+                    conversationUpdatedAt = conversationUpdatedAt - conversationId
+                    conversationPinnedIds = conversationPinnedIds - conversationId
+                    if (wasSelected) {
+                        conversationSelectionVersion += 1
+                        conversationSelectionJob?.cancel()
+                        selectedConversationId = null
+                        homeState = emptyChatState(defaultThinkingEnabled)
+                        isLoadingConversation = false
+                        conversationLoadFailed = false
+                    }
+                    conversationPaneState = conversationPaneState.copy(
+                        selectedConversationId = selectedConversationId,
+                    )
+                    refreshConversationSummaries()
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                                .deleteSession(conversationId)
+                        }
+                        io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                            .forgetSession(conversationId)
+                    }
+                    return@withContext
+                }
+                updateConversation(
+                    conversationId,
+                    // 服务端可能残留截断点之后的一小段（空提交会起一轮）：按 row_id 丢掉。
+                    current.copy(
+                        messages = messages ?: state.messages.take(userIndex),
+                        isStreaming = false,
+                        isConversationLoaded = true,
+                    ),
+                )
+            }
+        }
     }
 
     fun beginMessageEdit(messageId: String) {
@@ -1473,7 +1939,17 @@ internal class AgentAppState(
             persistConversations()
             return
         }
-        if (revisionBoundary(messageId) == null) return
+        if (revisionBoundary(messageId) == null) {
+            // Hermes 模式下本地没有"修订边界"概念：直接按服务端历史定位要删的轮次。
+            if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+                dispatchHermesDelete(conversationId, homeState, messageId)
+            }
+            return
+        }
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            dispatchHermesDelete(conversationId, homeState, messageId)
+            return
+        }
         val removed = AgentConversationRevisionReducer.deleteFromTurn(homeState, messageId) ?: return
         val removedIds = homeState.messages.mapTo(mutableSetOf()) { it.id }.apply {
             removeAll(removed.messages.map { it.id }.toSet())
@@ -1524,6 +2000,17 @@ internal class AgentAppState(
                 dataUrl = dataUrl,
                 mimeType = dataUrl.imageMimeType(),
             )
+        }
+        // Hermes：截断到该用户轮次再重发同样的文本 = 真正的"重新生成"。
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            dispatchHermesRewind(
+                conversationId = conversationId,
+                state = homeState,
+                userMessageIndex = boundary.userMessageIndex,
+                prompt = boundary.userMessage.content,
+                pendingImages = images,
+            )
+            return
         }
         val runId = "run-${UUID.randomUUID()}"
         val userHistoryMessage = AgentModelClient.buildUserHistoryMessage(
@@ -2509,6 +2996,9 @@ internal class AgentAppState(
     private companion object {
         const val MAX_TITLE_CHARS = 24
         const val MAX_PREVIEW_CHARS = 48
+
+        /** `sessions.changed` 节流：一秒多内连续到达只重拉一次。 */
+        const val HERMES_SESSION_REFRESH_THROTTLE_MS = 1500L
         const val LEGACY_STOPPED_ERROR = "已停止"
         const val SYNTHETIC_STATUS_STOPPED = "eta_status:stopped"
         private val SHARED_IMAGE_EXTENSIONS = setOf(

@@ -127,6 +127,7 @@ internal fun AgentAppShell(
     onOpenPermissions: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenModelProviders: () -> Unit,
+    onSyncHermes: () -> Unit,
     modifier: Modifier = Modifier,
     homeCharacter: RoleplayChatUi? = null,
     onOpenCharacter: () -> Unit = {},
@@ -273,6 +274,7 @@ internal fun AgentAppShell(
                 onOpenSkills = onOpenSkills,
                 onOpenCharacters = onOpenCharacters,
                 onOpenPermissions = onOpenPermissions,
+                onSyncHermes = onSyncHermes,
             ) {
                 pageContent()
             }
@@ -606,6 +608,7 @@ private fun titleForRoute(route: AppRoute?): String = when (route) {
     is AppRoute.Terminal -> stringResource(R.string.route_terminal)
     is AppRoute.Tools -> stringResource(R.string.route_tools)
     is AppRoute.WebToolsSettings -> stringResource(R.string.web_tools_settings_title)
+    is AppRoute.HermesBackend -> stringResource(R.string.hermes_settings_title)
     is AppRoute.Skills -> stringResource(R.string.route_skills)
     is AppRoute.Subagents -> "Subagent"
     is AppRoute.Characters -> "角色"

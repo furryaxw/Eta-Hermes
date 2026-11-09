@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ComponentName
 import android.service.voice.VoiceInteractionSession
 import android.text.InputType
+import io.github.mangi.eta.config.AssistantContextPolicy
 import io.github.mangi.eta.core.AssistantContextFlags
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -52,6 +53,31 @@ class EtaAssistantScreenContextTest {
         capture.close()
         capture.acceptScreenshot(null)
         assertEquals(EtaAssistantScreenContext.Snapshot(), capture.snapshot())
+    }
+
+    @Test
+    fun snapshotNeverAnnouncesAnAttachedScreenshot() = runBlocking {
+        val capture = EtaAssistantScreenContext(
+            VoiceInteractionSession.SHOW_WITH_SCREENSHOT,
+            listOf(ComponentName("current.app", "CurrentActivity")),
+        )
+        try {
+            capture.acceptScreenshot(null)
+            assertFalse(capture.snapshot().text.contains("本次已附屏幕截图"))
+        } finally { capture.close() }
+    }
+
+    @Test
+    fun disabledCategoriesLeaveTheSnapshotEmpty() = runBlocking {
+        val capture = EtaAssistantScreenContext(
+            0,
+            listOf(ComponentName("current.app", "CurrentActivity")),
+            AssistantContextPolicy(parts = emptySet()),
+        )
+        try {
+            assertEquals("", capture.snapshot().text)
+            assertNull(capture.snapshot().image)
+        } finally { capture.close() }
     }
 
     @Test

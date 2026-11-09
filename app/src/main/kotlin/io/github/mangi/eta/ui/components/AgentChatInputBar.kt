@@ -61,6 +61,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import io.github.mangi.eta.agent.hermes.HermesMode
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -161,6 +162,7 @@ internal fun AgentChatInputBar(
     onCancelMessageEdit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val hermesActive by HermesMode.enabled.collectAsState()
     val keyboard = LocalSoftwareKeyboardController.current
     val hapticFeedback = LocalHapticFeedback.current
     val focusRequester = remember { FocusRequester() }
@@ -421,7 +423,7 @@ internal fun AgentChatInputBar(
 
                             Spacer(modifier = Modifier.width(2.dp))
 
-                            if (availableReasoningEfforts.isNotEmpty()) {
+                            if (availableReasoningEfforts.isNotEmpty() && !hermesActive) {
                                 ThinkingEffortChip(
                                     effort = reasoningEffort,
                                     options = availableReasoningEfforts,
@@ -435,7 +437,7 @@ internal fun AgentChatInputBar(
 
                         Spacer(modifier = Modifier.weight(1f))
 
-                        if (showContextUsage) {
+                        if (showContextUsage && !hermesActive) {
                             AgentContextUsageButton(usage = contextUsage, onCompact = onCompactContext, canCompact = canCompactContext && !isStreaming)
 
                             Spacer(modifier = Modifier.width(2.dp))
@@ -446,13 +448,15 @@ internal fun AgentChatInputBar(
                             Spacer(modifier = Modifier.width(2.dp))
                         }
 
-                        AgentModelPickerButton(
-                            state = modelPickerState,
-                            isStreaming = isStreaming,
-                            popupAnchorTopPx = inputContainerTopPx,
-                            popupMaxHeight = thinkingPopupMaxHeight,
-                            onModelSelected = onModelSelected,
-                        )
+                        if (!hermesActive) {
+                            AgentModelPickerButton(
+                                state = modelPickerState,
+                                isStreaming = isStreaming,
+                                popupAnchorTopPx = inputContainerTopPx,
+                                popupMaxHeight = thinkingPopupMaxHeight,
+                                onModelSelected = onModelSelected,
+                            )
+                        }
 
                         val showStreamingSend = isStreaming && !isCompacting && canSend
                         val submitCurrentDraft: (Boolean) -> Unit = { interrupt ->

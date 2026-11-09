@@ -94,6 +94,7 @@ import io.github.mangi.eta.ui.screens.terminal.TerminalEntryScreen
 import io.github.mangi.eta.ui.screens.terminal.WorkspaceScreen
 import io.github.mangi.eta.ui.screens.tools.AgentToolsScreen
 import io.github.mangi.eta.ui.screens.tools.WebToolsSettingsScreen
+import io.github.mangi.eta.ui.screens.hermes.HermesBackendScreen
 import io.github.mangi.eta.ui.voice.SpeechOssScreen
 import io.github.mangi.eta.ui.voice.SpeechRecognitionScreen
 import io.github.mangi.eta.ui.voice.SpeechSettingsScreen
@@ -365,6 +366,7 @@ fun AgentAppRoot(
             onOpenPermissions = { pushRoute(AppRoute.Permissions) },
             onOpenSettings = { pushRoute(AppRoute.Settings) },
             onOpenModelProviders = { pushRoute(AppRoute.ModelProviders) },
+            onSyncHermes = { agentState.syncHermesSessions() },
             homeCharacter = if (route is AppRoute.Home) agentState.homeState.roleplayChatUi() else null,
             onOpenCharacter = {
                 agentState.homeState.roleplay?.let { pushRoute(AppRoute.CharacterDetail(it.characterId)) }
@@ -490,6 +492,9 @@ fun AgentAppRoot(
             }
             entry<AppRoute.WebToolsSettings>(swipeDismiss = swipeDismiss) {
                 WebToolsSettingsScreen(onBack = ::popRoute)
+            }
+            entry<AppRoute.HermesBackend>(swipeDismiss = swipeDismiss) {
+                HermesBackendScreen(onBack = ::popRoute)
             }
             entry<AppRoute.Subagents>(swipeDismiss = swipeDismiss) {
                 SubagentSettingsScreen(onBack = ::popRoute)

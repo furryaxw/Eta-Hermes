@@ -164,6 +164,15 @@
         </service>
 
         <service
+            android:name=".agent.hermes.HermesBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the outbound tool bridge to the user's Hermes agent backend connected" />
+        </service>
+
+        <service
             android:name=".agent.accessibility.AgentAccessibilityService"
             android:exported="true"
             android:label="@string/agent_accessibility_label"

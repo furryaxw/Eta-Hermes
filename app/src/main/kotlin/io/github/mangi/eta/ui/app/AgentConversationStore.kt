@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.JsonReader
 import android.util.JsonToken
 import androidx.room.withTransaction
+import io.github.mangi.eta.agent.hermes.HermesConversationMirror
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.roleplay.RoleplayBinding
@@ -75,9 +76,13 @@ internal object AgentConversationStore {
         titles: Map<String, String>,
         updatedAt: Map<String, Long>,
         pinnedIds: Set<String> = emptySet(),
-    ) = AgentConversationPersistence().save(
-        context, Snapshot(selectedConversationId, conversationsById, titles, updatedAt, pinnedIds),
-    )
+    ) {
+        // Hermes 模式下会话真源在服务端：写回本地会把 Hermes 列表里没有的会话当成"已删除"清掉。
+        if (HermesConversationMirror.isActive(context)) return
+        AgentConversationPersistence().save(
+            context, Snapshot(selectedConversationId, conversationsById, titles, updatedAt, pinnedIds),
+        )
+    }
 
     internal suspend fun saveChanges(
         context: Context,
@@ -85,6 +90,7 @@ internal object AgentConversationStore {
         current: Map<String, AgentConversationPersistence.Content>,
         previous: Map<String, AgentConversationPersistence.Content>,
     ) {
+        if (HermesConversationMirror.isActive(context)) return
         val appContext = context.applicationContext
         saveMutex.withLock {
             withContext(Dispatchers.IO) {
@@ -186,6 +192,25 @@ internal object AgentConversationStore {
     }
 
     private suspend fun loadSnapshot(context: Context): Snapshot {
+        // Hermes 后端接管的会话列表：只镜像服务端，本地 AI 会话不参与。
+        if (HermesConversationMirror.isActive(context)) {
+            HermesConversationMirror.snapshot(context)?.let { snapshot ->
+                // 与本地分支一致：首个会话要立即加载，否则 UI 会一直停在"正在加载会话"。
+                val selected = snapshot.selectedConversationId
+                val loaded = selected?.let {
+                    // 单个会话打不开不该拖垮整个启动：失败就让它保持未加载，点开时再试。
+                    runCatching { HermesConversationMirror.loadConversation(context, it) }.getOrNull()
+                }
+                return if (selected != null && loaded != null) {
+                    snapshot.copy(
+                        conversationsById = snapshot.conversationsById + (selected to loaded),
+                    )
+                } else {
+                    // 打不开就回到空态，别让 UI 卡在加载转圈里。
+                    snapshot.copy(selectedConversationId = null)
+                }
+            }
+        }
         val dao = EtaDatabase.get(context).conversationDao()
         val conversations = dao.conversationIndex()
         if (conversations.isEmpty()) {
@@ -247,6 +272,9 @@ internal object AgentConversationStore {
     )
 
     suspend fun loadConversation(context: Context, conversationId: String): AgentChatHomeUiState? = withContext(Dispatchers.IO) {
+        if (HermesConversationMirror.isActive(context)) {
+            return@withContext HermesConversationMirror.loadConversation(context, conversationId)
+        }
         val database = EtaDatabase.get(context.applicationContext)
         database.withTransaction {
             val dao = database.conversationDao()
