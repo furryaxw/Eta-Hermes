@@ -1112,6 +1112,11 @@
   <string name="settings_context_extensions">Context &amp; extensions</string>
   <string name="conversation_sync_done">Synced from Hermes</string>
   <string name="conversation_sync_failed">Could not sync sessions from Hermes</string>
+  <string name="hermes_prompt_approval_title">Approval needed</string>
+  <string name="hermes_prompt_clarify_title">More information needed</string>
+  <string name="hermes_prompt_send">Send</string>
+  <string name="hermes_prompt_input_hint">Your answer</string>
+  <string name="hermes_push_title">Message from Hermes</string>
   <string name="settings_assistant_context">Assistant context</string>
   <string name="settings_assistant_context_timing">When to attach</string>
   <string name="settings_assistant_context_timing_summary">Extra data the phone attaches when the assistant wakes</string>

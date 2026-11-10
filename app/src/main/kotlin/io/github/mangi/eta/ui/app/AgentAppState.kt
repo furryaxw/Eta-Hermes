@@ -16,6 +16,12 @@ import io.github.mangi.eta.EtaApp
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.device.AgentFileReferenceGateway
 import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.agent.hermes.HermesLinkHolder
+import io.github.mangi.eta.agent.hermes.HermesPrompt
+import io.github.mangi.eta.agent.hermes.HermesPromptParser
+import io.github.mangi.eta.agent.hermes.HermesPushNotification
+import io.github.mangi.eta.agent.hermes.HermesRpc
+import io.github.mangi.eta.agent.hermes.HermesRpcHolder
 import io.github.mangi.eta.agent.media.AgentImageCodec
 import io.github.mangi.eta.agent.model.AgentFileReference
 import io.github.mangi.eta.agent.model.AgentFileReferenceKind
@@ -151,6 +157,10 @@ internal class AgentAppState(
     var modelPickerState by mutableStateOf(AgentModelPickerUiState())
         private set
 
+    /** 等待用户回答的服务端请求（审批 / 澄清）；有值时全局显示对话框。 */
+    var hermesPrompt by mutableStateOf<HermesPrompt?>(null)
+        private set
+
     var conversationPaneState by mutableStateOf(
         ConversationPaneUiState(
             conversations = emptyList(),
@@ -166,9 +176,18 @@ internal class AgentAppState(
         // Hermes 那边新开/删除会话时，列表跟着动，不用重启 App。
         if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
             runCatching {
-                io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext).onEvent = { event ->
+                val rpc = io.github.mangi.eta.agent.hermes.HermesRpcHolder.link(appContext)
+                rpc.onEvent = { event ->
                     if (event.name == "sessions.changed") refreshHermesSessions()
                 }
+                // 审批与澄清：应答之前服务端一直等，所以必须挂上处理器。
+                rpc.onServerRequest = { request ->
+                    scope.launch(Dispatchers.Main) {
+                        hermesPrompt = HermesPromptParser.parse(request)
+                    }
+                }
+                // 没有等待者的下行回复（cron / send_message）走通知。
+                HermesLinkHolder.link(appContext).onPush = { frame -> handleHermesPush(frame) }
             }
         }
         // 改了后端地址或重新登录：立刻按新模式重建会话状态，而不是等下次启动。
@@ -641,6 +660,9 @@ internal class AgentAppState(
     }
 
     private suspend fun importArchivedExternalRuns() {
+        // Hermes 模式下消息真源在服务端：外部入口那一轮已经有自己的服务端会话。
+        // 再按归档 id 导入，会多出一条没有服务端身份、点开必然加载失败的会话。
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) return
         val archivedRuns = withContext(Dispatchers.IO) {
             AgentRunArchiveStore.list(appContext)
                 .filter { AgentExternalArchivePayload.from(it.handoff.payload) != null }
@@ -668,12 +690,15 @@ internal class AgentAppState(
     /** 打开外部入口按 [source] 与 [conversationKey] 归档的会话；先导入尚未入库的归档结果。 */
     suspend fun openArchivedConversation(source: String, conversationKey: String): Boolean {
         if (source.isBlank() || conversationKey.isBlank()) return false
+        val conversationId = archiveConversationId(
+            source = source,
+            conversationKey = conversationKey,
+        )
+        if (io.github.mangi.eta.agent.hermes.HermesConversationMirror.isActive(appContext)) {
+            return openHermesArchivedConversation(conversationId)
+        }
         importArchivedExternalRuns()
         return withContext(Dispatchers.Main.immediate) {
-            val conversationId = archiveConversationId(
-                source = source,
-                conversationKey = conversationKey,
-            )
             if (conversationsById[conversationId] == null) {
                 false
             } else {
@@ -681,6 +706,26 @@ internal class AgentAppState(
                 true
             }
         }
+    }
+
+    /**
+     * 外部入口的会话在 Hermes 侧是另一套 id（stored_session_id）；本地归档 id 只能当映射的键。
+     *
+     * 拿归档 id 去 resume 既打不开，又会在列表里立出一条没有服务端身份的会话。
+     */
+    private suspend fun openHermesArchivedConversation(archiveId: String): Boolean {
+        val stored = io.github.mangi.eta.agent.hermes.HermesSettings
+            .rpcSessionId(appContext, archiveId)
+        if (stored.isBlank()) return false
+        withContext(Dispatchers.Main.immediate) {
+            if (conversationsById[stored] == null) {
+                conversationsById = conversationsById + (stored to emptyChatState(defaultThinkingEnabled))
+                conversationTitles = conversationTitles +
+                    (stored to conversationTitles[archiveId].orEmpty())
+            }
+            selectConversation(stored)
+        }
+        return true
     }
 
     private fun importExternalRun(archivedRun: AgentRunArchiveStore.ArchivedRun): String? {
@@ -1089,6 +1134,42 @@ internal class AgentAppState(
                 refreshConversationSummaries()
                 onDone(true)
             }
+        }
+    }
+
+    /**
+     * 回答当前提示。[value] 为空时按拒绝处理：服务端在等到答复之前不会继续。
+     */
+    fun answerHermesPrompt(value: String?) {
+        val prompt = hermesPrompt ?: return
+        hermesPrompt = null
+        val choice = value?.trim().takeUnless { it.isNullOrBlank() } ?: HermesRpc.DENY_CHOICE
+        val rpc = HermesRpcHolder.link(appContext)
+        rpc.answerServerRequest(
+            prompt.requestId,
+            org.json.JSONObject().put("prompt_id", prompt.promptId).put("choice", choice),
+        )
+        if (prompt.isApproval && prompt.promptId.isNotBlank()) {
+            scope.launch(Dispatchers.IO) { rpc.respondApproval(prompt.promptId, choice) }
+        }
+    }
+
+    /** 主动推送（cron / send_message）：通知里给出会话与摘要，点开走服务端历史。 */
+    private fun handleHermesPush(frame: org.json.JSONObject) {
+        val text = frame.optString("text").trim()
+        if (text.isBlank()) return
+        val session = frame.optString("session")
+        val messageId = frame.optString("message_id")
+        scope.launch(Dispatchers.Main) {
+            val title = conversationTitles[session]?.takeIf { it.isNotBlank() }
+                ?: appContext.getString(R.string.hermes_push_title)
+            HermesPushNotification.show(appContext, session, messageId, title, text)
+            if (session.isNotBlank()) {
+                conversationUpdatedAt = conversationUpdatedAt + (session to System.currentTimeMillis())
+                refreshConversationSummaries()
+            }
+            // 推送会连来多帧：这里走节流版本，别每帧都打一次 session.list。
+            refreshHermesSessions()
         }
     }
 

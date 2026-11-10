@@ -52,6 +52,7 @@ import io.github.mangi.eta.data.repository.RuntimeConfigRepository
 import io.github.mangi.eta.ui.AppearanceSettingsScreen
 import io.github.mangi.eta.ui.IncomingShareRequest
 import io.github.mangi.eta.ui.SettingsScreen
+import io.github.mangi.eta.ui.components.HermesPromptDialog
 import io.github.mangi.eta.ui.components.MiuixDialogActions
 import io.github.mangi.eta.ui.components.coui.CouiConfirmDialog
 import io.github.mangi.eta.ui.components.coui.CouiInputDialog
@@ -1016,6 +1017,14 @@ fun AgentAppRoot(
                 }
             }
         }
+    }
+
+    agentState.hermesPrompt?.let { prompt ->
+        HermesPromptDialog(
+            prompt = prompt,
+            onAnswer = { value -> agentState.answerHermesPrompt(value) },
+            onDismiss = { agentState.answerHermesPrompt(null) },
+        )
     }
 }
 

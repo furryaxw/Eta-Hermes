@@ -71,6 +71,14 @@ internal class HermesLink(
 
     val isConnected: Boolean get() = connected.get() && socket != null
 
+    /**
+     * 没有等待者的下行回复：cron、`send_message` 这类服务端主动推送。
+     *
+     * 在本端发起的一轮对话里，回复都能对上 [awaiting] 里的 sink；对不上就说明没人等它。
+     */
+    @Volatile
+    var onPush: ((JSONObject) -> Unit)? = null
+
     // ------------------------------------------------------------------ //
     // lifecycle
     // ------------------------------------------------------------------ //
@@ -279,7 +287,12 @@ internal class HermesLink(
 
     private fun deliver(frame: JSONObject) {
         val session = frame.optString("session")
-        val sink = awaiting[session.ifBlank { currentSession }] ?: return
+        val sink = awaiting[session.ifBlank { currentSession }]
+        if (sink == null) {
+            // 没有本轮等待者：这是服务端主动推送进来的内容。
+            if (frame.optString("type") != "turn.done") onPush?.invoke(frame)
+            return
+        }
         if (frame.optString("type") == "turn.done") sink.complete() else sink.accept(frame)
     }
 

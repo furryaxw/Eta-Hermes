@@ -258,9 +258,13 @@ internal class HermesRunExecutor(
                     }
 
                     "approval.request" -> {
-                        // 第一版没有审批 UI：显式拒绝，避免 Hermes 侧等到超时。
-                        runId?.let { id -> runCatching { client.approve(id, "deny") } }
-                        terminalError = "Hermes 请求执行需要审批的命令，当前版本尚未接入审批界面"
+                        // 审批主路径是 dashboard 的 JSON-RPC 请求（见 HermesRpc.onServerRequest），
+                        // 界面会弹窗让用户选。这里只兜底没有 prompt_id 的旧事件：服务端只发事件时
+                        // 没人能应答，直接拒绝，别让它等到超时。
+                        if (data.optString("prompt_id").isBlank()) {
+                            runId?.let { id -> runCatching { client.approve(id, "deny") } }
+                            terminalError = "Hermes 请求审批，但请求里没有 prompt_id，无法定位这次确认"
+                        }
                     }
 
                     "assistant.completed" -> {

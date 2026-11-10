@@ -1094,6 +1094,11 @@
   <string name="settings_context_extensions">上下文与扩展</string>
   <string name="conversation_sync_done">已从 Hermes 同步</string>
   <string name="conversation_sync_failed">无法从 Hermes 同步会话</string>
+  <string name="hermes_prompt_approval_title">需要你确认</string>
+  <string name="hermes_prompt_clarify_title">需要你补充信息</string>
+  <string name="hermes_prompt_send">发送</string>
+  <string name="hermes_prompt_input_hint">你的回答</string>
+  <string name="hermes_push_title">Hermes 消息</string>
   <string name="settings_assistant_context">助理上下文</string>
   <string name="settings_assistant_context_timing">附带时机</string>
   <string name="settings_assistant_context_timing_summary">助理唤醒时随消息带给模型的数据</string>

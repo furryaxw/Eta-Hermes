@@ -82,6 +82,14 @@ internal class HermesRpc(context: Context) : AutoCloseable {
     @Volatile
     var onEvent: ((HermesRpcEvent) -> Unit)? = null
 
+    /**
+     * 服务端发来的请求：审批与澄清。应答之前它会一直等待，所以必须有回应。
+     *
+     * 没挂处理器时按拒绝回应，避免把一轮任务挂死在超时上。
+     */
+    @Volatile
+    var onServerRequest: ((HermesServerRequest) -> Unit)? = null
+
     val isConnected: Boolean get() = socket != null
 
     // ------------------------------------------------------------------ //
@@ -138,6 +146,21 @@ internal class HermesRpc(context: Context) : AutoCloseable {
                 onEvent?.invoke(HermesRpcEvent(type, payload))
                 return
             }
+            // 服务端发起的请求也带 id，但不是我们的响应：先于响应分支处理。
+            if (frame.has("method") && frame.has("id")) {
+                val request = HermesServerRequest(
+                    id = frame.optInt("id"),
+                    method = frame.optString("method"),
+                    params = frame.optJSONObject("params") ?: JSONObject(),
+                )
+                val handler = onServerRequest
+                if (handler == null) {
+                    answerServerRequest(request.id, JSONObject().put("choice", DENY_CHOICE))
+                } else {
+                    handler(request)
+                }
+                return
+            }
             if (frame.has("id")) {
                 pending.remove(frame.optInt("id"))?.complete(frame)
             }
@@ -190,6 +213,35 @@ internal class HermesRpc(context: Context) : AutoCloseable {
     private fun errorOf(response: JSONObject): String? {
         val error = response.optJSONObject("error") ?: return null
         return error.optString("message").ifBlank { "Hermes 返回错误" }
+    }
+
+    /**
+     * 应答服务端请求：必须是 JSON-RPC 响应，id 用请求帧自己的 id。
+     *
+     * 走 [request] 那条路会新分配一个 id，服务端认不出这是对哪个请求的回答。
+     */
+    fun answerServerRequest(id: Int, payload: JSONObject) {
+        val ws = socket ?: return
+        runCatching {
+            ws.send(
+                JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", id)
+                    .put("result", payload)
+                    .toString(),
+            )
+        }
+    }
+
+    /** 在 Hermes 自己的审批通道上再确认一次；通道不存在时忽略。 */
+    fun respondApproval(promptId: String, choice: String) {
+        runCatching {
+            request(
+                "approval.respond",
+                JSONObject().put("prompt_id", promptId).put("choice", choice),
+                15,
+            )
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -738,6 +790,9 @@ internal class HermesRpc(context: Context) : AutoCloseable {
 
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        /** 拒绝用的取值：Hermes 的聊天命令是 `/approve`、`/deny`，两者对应这套取值。 */
+        const val DENY_CHOICE = "deny"
         /** `https://host:9119/eta` → `wss://host:9119/api/ws?token=…`。 */
         fun dashboardWsUrl(baseUrl: String, token: String): String {
             val trimmed = baseUrl.trim().trimEnd('/')
