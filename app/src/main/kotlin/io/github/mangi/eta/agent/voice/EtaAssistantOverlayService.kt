@@ -127,6 +127,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
     private var windowView: ComposeView? = null
     private var windowParams: WindowManager.LayoutParams? = null
     private var detachingWindowView: View? = null
+    private var entryReadyTimeout: Runnable? = null
     private val windowDetachCallbacks = mutableListOf<(Boolean) -> Unit>()
     private var backInvokedDispatcher: OnBackInvokedDispatcher? = null
     private var backInvokedCallback: OnBackInvokedCallback? = null
@@ -335,12 +336,14 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
                         onEntranceFinished = {
                             if (generation == entryGeneration) {
                                 entryEntranceComplete = true
+                                enableOverlayTouchWhenReady()
                                 presentEntryInput()
                             }
                         },
                         onContentReady = {
                             if (generation == entryGeneration) {
                                 entryContentReady = true
+                                enableOverlayTouchWhenReady()
                                 presentEntryInput()
                             }
                         },
@@ -391,7 +394,8 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS,
+                WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.START
@@ -413,7 +417,55 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         windowView = view
         windowParams = params
         registerSystemBackCallback(view)
-        view.requestFocus()
+        armEntryReadyTimeout()
+    }
+
+    /**
+     * 入口内容就绪前窗口保持不可触，只穿透不拦截；就绪后解除。
+     * 否则一次没有画出内容的唤醒会留下一层吃掉整屏点击的透明窗口。
+     */
+    private fun setOverlayTouchable(touchable: Boolean) {
+        val wm = windowManager ?: return
+        val view = windowView ?: return
+        val params = windowParams ?: return
+        val currentlyTouchable =
+            (params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
+        if (currentlyTouchable == touchable) return
+        params.flags = if (touchable) {
+            params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        val applied = runCatching { wm.updateViewLayout(view, params) }.isSuccess
+        if (applied && touchable) view.requestFocus()
+    }
+
+    /** 入场动画或内容绘制任一完成，说明界面已经可见，可以接管触摸。 */
+    private fun entrySurfaceInteractive(): Boolean = entryEntranceComplete || entryContentReady
+
+    private fun enableOverlayTouchWhenReady() {
+        if (!entrySurfaceInteractive()) return
+        disarmEntryReadyTimeout()
+        setOverlayTouchable(true)
+    }
+
+    private fun armEntryReadyTimeout() {
+        disarmEntryReadyTimeout()
+        val runnable = Runnable {
+            entryReadyTimeout = null
+            if (windowView == null) return@Runnable
+            if (!entrySurfaceInteractive()) {
+                AndroidAgentLogger.warn("Eta assistant overlay entry never became ready; dismissing")
+                dismissAndStop()
+            }
+        }
+        entryReadyTimeout = runnable
+        mainHandler.postDelayed(runnable, ENTRY_READY_TIMEOUT_MS)
+    }
+
+    private fun disarmEntryReadyTimeout() {
+        entryReadyTimeout?.let { mainHandler.removeCallbacks(it) }
+        entryReadyTimeout = null
     }
 
     private fun createComposeView(content: @Composable () -> Unit): ComposeView =
@@ -733,6 +785,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         speechInput.cancel()
         speechState = EtaSpeechState()
         unregisterSystemBackCallback()
+        disarmEntryReadyTimeout()
         detachingWindowView?.let { detachingView ->
             onComplete?.let(windowDetachCallbacks::add)
             if (!detachingView.isAttachedToWindow) {
@@ -888,6 +941,7 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
         private const val ACTION_HANDOFF_READY = "io.github.mangi.eta.agent.voice.HANDOFF_READY"
         private const val HANDOFF_TIMEOUT_MS = 5_000L
         private const val HANDOFF_EXIT_DURATION_MS = 220L
+        private const val ENTRY_READY_TIMEOUT_MS = 6_000L
         private const val HANDOFF_REQUEST_CODE = 0x455441
         private const val LEGACY_STOPPED_ERROR = "已停止"
         private const val SYNTHETIC_STOPPED = "eta_status:stopped"
